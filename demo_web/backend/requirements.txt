@@ -1,0 +1,14 @@
+# Portable CPU/macOS runtime. CUDA users: see README for the optional quantization package.
+accelerate==1.14.0
+fastapi==0.141.1
+huggingface-hub==1.33.0
+httpx==0.28.1
+numpy==2.5.2
+Pillow==12.3.0
+python-multipart==0.0.32
+safetensors==0.8.0
+scipy==1.18.1
+torch==2.13.0
+torchvision==0.28.0
+transformers==5.16.1
+uvicorn==0.52.4
