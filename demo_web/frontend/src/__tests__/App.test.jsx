@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import App, { Compare } from '../App.jsx'
 
 const healthy = {cnn_ready:true, cuda_available:false}
@@ -118,9 +118,9 @@ describe('reference and text handoff', () => {
   })
 
   it('hands text-plan values to regional fine tune with unit strength', async () => {
-    fetchMock.mockImplementation(async url => response(
+    const pendingSegmentation = deferred()
+    fetchMock.mockImplementation(async url => url === '/api/segment' ? pendingSegmentation.promise : response(
       url === '/api/enhance/text' ? {...result(), region_json:{global:{r:.05,contrast:.15},sky:{b:.1}}} :
-      url === '/api/segment' ? regions :
       url === '/api/enhance/manual-regions' ? result('/outputs/refined.png') : healthy
     ))
     render(<App />)
@@ -131,9 +131,16 @@ describe('reference and text handoff', () => {
     fireEvent.click(screen.getByRole('button', {name:/^Enhance Image/}))
     await screen.findByAltText('Enhanced result')
     fireEvent.click(screen.getByRole('button', {name:/Fine Tune AI Result/}))
+    expect(screen.getByRole('button', {name:/^Preparing fine tune/}).disabled).toBe(true)
+    expect(screen.getByRole('button', {name:'Enhance Again'}).disabled).toBe(true)
+    expect(requests('/api/enhance/manual-regions')).toHaveLength(0)
+    await act(async () => pendingSegmentation.resolve(response(regions)))
     await screen.findByRole('button', {name:/sky\s*60\s*%/})
-    expect(screen.getByRole('slider', {name:/Overall Strength/}).value).toBe('1')
-    expect(screen.getByRole('slider', {name:/Contrast/}).value).toBe('0.15')
+    await waitFor(() => {
+      expect(screen.getByRole('slider', {name:/Overall Strength/}).value).toBe('1')
+      expect(screen.getByRole('slider', {name:/Contrast/}).value).toBe('0.15')
+      expect(screen.getByRole('button', {name:/^Apply Enhancement/}).disabled).toBe(false)
+    })
     apply()
     await settle()
     const form = requests('/api/enhance/manual-regions')[0][1].body

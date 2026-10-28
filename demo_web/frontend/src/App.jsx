@@ -106,6 +106,7 @@ export default function App() {
   }
   function invalidateResult() {
     cancelJob('enhance')
+    cancelJob('handoff')
     setLoading(false)
     setElapsed(0)
     setResult(null)
@@ -136,17 +137,6 @@ export default function App() {
   }, [loading])
   useEffect(() => () => { if (sourcePreview.startsWith('blob:')) URL.revokeObjectURL(sourcePreview) }, [sourcePreview])
   useEffect(() => () => { if (referencePreview.startsWith('blob:')) URL.revokeObjectURL(referencePreview) }, [referencePreview])
-  useEffect(() => {
-    if (!handoff || !segmentation || result?.method !== 'text') return
-    const plan = result.region_json || {}, global = plan.global || {}
-    setManual({red:global.r||0, green:global.g||0, blue:global.b||0, contrast:global.contrast||0})
-    setManualStrength(1)
-    setRegional(Object.fromEntries(segmentation.regions.filter(region => region.coverage >= .005).map(region => {
-      const values = plan[region.label] || {}
-      return [region.region_id, {red:values.r||0, green:values.g||0, blue:values.b||0, contrast:values.contrast||0, strength:1}]
-    })))
-    setHandoff(false)
-  }, [handoff, segmentation, result])
 
   async function selectFile(file, kind) {
     if (!/\.(png|jpe?g|tiff?)$/i.test(file.name)) return setError('Please upload a PNG, JPG/JPEG, or TIF/TIFF image.')
@@ -234,6 +224,7 @@ export default function App() {
       if (!isCurrent('segment', controller)) return
       setSegmentation(data)
       setRegionMessage(`Regions ready · ${data.regions.filter(region => region.coverage >= .005).length} editable`)
+      return data
     } catch (failure) {
       if (isCurrent('segment', controller)) setError(failure instanceof TypeError ? 'Region detection failed. Check the backend connection.' : failure.message)
     } finally {
@@ -258,11 +249,26 @@ export default function App() {
   function resetAllControls() {
     setManual({red:0,green:0,blue:0,contrast:0}); setManualStrength(1); setRegional({})
   }
-  function fineTuneAiPlan() {
+  async function fineTuneAiPlan() {
+    const controller = beginJob('handoff')
+    const plan = result.region_json || {}
     setHandoff(true)
     setSelectedScope('global')
     setTab('manual')
-    if (!segmentation) segmentSource()
+    try {
+      const detected = segmentation || await segmentSource()
+      if (!detected || !isCurrent('handoff', controller)) return
+      const global = plan.global || {}
+      setManual({red:global.r||0, green:global.g||0, blue:global.b||0, contrast:global.contrast||0})
+      setManualStrength(1)
+      setRegional(Object.fromEntries(detected.regions.filter(region => region.coverage >= .005).map(region => {
+        const values = plan[region.label] || {}
+        return [region.region_id, {red:values.r||0, green:values.g||0, blue:values.b||0, contrast:values.contrast||0, strength:1}]
+      })))
+    } finally {
+      // The controls and readiness update together, after the plan has been copied.
+      if (isCurrent('handoff', controller)) setHandoff(false)
+    }
   }
   function changeTab(next) {
     if (next === tab) return
@@ -294,7 +300,7 @@ export default function App() {
   const stage = tab === 'text' ? 'Processing text preference…' : tab === 'reference' ? 'Applying reference appearance…' : 'Applying fine tune…'
 
   async function enhance() {
-    if (loading) return
+    if (loading || segmentationLoading || handoff) return
     if (!source) return setError('Please upload an image first.')
     if (!sourcePreview) return setError('Please wait for the image preview to finish.')
     if (tab === 'reference' && (!reference || !referencePreview)) return setError('Please upload a reference image and wait for its preview.')
@@ -353,12 +359,12 @@ export default function App() {
         {tab === 'reference' && <div className="panel"><Upload compact label="REFERENCE IMAGE" file={reference} preview={referencePreview} dimensions={referenceSize} onFile={f=>selectFile(f,'reference')} onRemove={()=>removeFile('reference')}/><Slider label="Reference Strength" value={referenceStrength} onChange={setReferenceStrength} min={0} max={1} step={.01} percent/><label className="check"><input type="checkbox" checked={regionAware} onChange={e=>setRegionAware(e.target.checked)}/> Semantic region matching (loads segmentation model)</label>{result?.method==='reference'&&<div className="mini-reference"><b>{result.mode_used==='region-aware'?'Region-aware':'Global fallback'}</b>{channels.map(([key,label])=><span key={key}>{label} {result.final_global_adjustments[key]>0?'+':''}{result.final_global_adjustments[key].toFixed(3)}</span>)}<small>Matched: {result.matched_regions.map(x=>x.name).join(', ')||'none'}</small></div>}<p className="honesty" title="Reference mode converts reference-image appearance statistics and semantic region matches into the CNN conditioning space.">Uses robust image statistics and optional semantic-region matching to convert appearance into the CNN’s real R/G/B/Contrast conditioning space.</p></div>}
         {tab === 'manual' && <div className="panel manual"><div className="scope-head"><span className="field-label">Edit scope</span>{segmentation&&<span className="regions-ready">● Regions ready</span>}</div><div className="scope-chips"><button className={selectedScope==='global'?'active':''} onClick={()=>setSelectedScope('global')}>Global</button>{visibleRegions.map(region=><button className={String(selectedScope)===String(region.region_id)?'active':''} key={region.region_id} onClick={()=>{setSelectedScope(String(region.region_id));setRegionMessage('')}}>{region.label}<small>{(region.coverage*100).toFixed(0)}%</small></button>)}</div>{!segmentation&&<div className="region-opt-in"><button className="subtle" disabled={!source||segmentationLoading||loading} onClick={segmentSource}>{segmentationLoading?'Detecting regions…':'Detect Regions'}</button><p className="model-note">Global controls work without region detection. Detecting regions loads the optional segmentation model.</p></div>}{(segmentationLoading||regionMessage)&&<div className="region-message" role="status">{segmentationLoading?'Detecting semantic regions…':regionMessage}</div>}<div className="selected-region">Selected Region <b>{selectedScope==='global'?'Global':segmentation?.regions.find(r=>String(r.region_id)===String(selectedScope))?.label}</b></div>{channels.map(([key,label])=><Slider key={key} label={label} value={selectedControl[key]} onChange={value=>updateSelected(key,value)}/>)}<Slider label={selectedScope==='global'?'Overall Strength':'Region Strength'} value={selectedControl.strength} onChange={value=>updateSelected('strength',value)} min={0} max={1} step={.01} percent/><div className="row"><button className="subtle" onClick={resetRegion}>Reset Region</button><button className="subtle" onClick={resetAllControls}>Reset All</button></div><div className="region-summary"><span className="field-label">Enhancement Plan</span>{[['global',{...manual,strength:manualStrength}],...Object.entries(regional)].map(([id,control])=>{const changes=channels.filter(([key])=>control[key]).map(([key,label])=>`${label} ${control[key]>0?'+':''}${control[key].toFixed(2)}`);if(!changes.length)return null;const name=id==='global'?'Global':segmentation?.regions.find(r=>String(r.region_id)===String(id))?.label;return <div key={id}><b>{name}</b><span>{changes.join(' · ')}</span></div>})}</div></div>}
         {error && <div className="error" role="alert">{error}</div>}
-        <button className="enhance" disabled={loading||segmentationLoading} onClick={enhance}>{loading?<><span className="spinner"/>{stage} <b>{elapsed.toFixed(1)}s</b></>:`${tab==='reference'?'Apply Reference Style':tab==='manual'?'Apply Enhancement':'Enhance Image'}  →`}</button>
+        <button className="enhance" disabled={loading||segmentationLoading||handoff} onClick={enhance}>{loading?<><span className="spinner"/>{stage} <b>{elapsed.toFixed(1)}s</b></>:`${handoff?'Preparing fine tune…':tab==='reference'?'Apply Reference Style':tab==='manual'?'Apply Enhancement':'Enhance Image'}  →`}</button>
       </section>
       <section className="output"><div className="eyebrow">02 · ENHANCED IMAGE</div>{result ? <img src={result.enhanced_image_url} alt="Enhanced result"/> : <div className="output-empty"><span>✦</span><strong>Your result appears here</strong><small>Choose a control method and enhance</small></div>}{result&&<div className="fileline"><span>{result.method==='text'?'Text AI':result.method==='reference'?'Reference Transfer':'Manual Fine Tune'}</span><span>{result.total_processing_seconds.toFixed(2)}s</span></div>}</section>
     </section>
 
-    {result && <section className="results"><div className="result-head"><div><span className="kicker">RESULT</span><h2>Before / After</h2></div><div className="row"><a className="text-button" href={result.enhanced_image_url} download="enhanced.png">Download</a><button className="text-button" disabled={loading||segmentationLoading} onClick={enhance}>Enhance Again</button><button className="text-button" onClick={reset}>Reset</button></div></div><Compare before={sourcePreview} after={result.enhanced_image_url}/>
+    {result && <section className="results"><div className="result-head"><div><span className="kicker">RESULT</span><h2>Before / After</h2></div><div className="row"><a className="text-button" href={result.enhanced_image_url} download="enhanced.png">Download</a><button className="text-button" disabled={loading||segmentationLoading||handoff} onClick={enhance}>Enhance Again</button><button className="text-button" onClick={reset}>Reset</button></div></div><Compare before={sourcePreview} after={result.enhanced_image_url}/>
       {result.method==='reference'&&<div className="reference-analysis"><div><span>Mode used</span><b>{result.mode_used}</b></div>{channels.map(([key,label])=><div key={key}><span>{label}</span><b>{result.final_global_adjustments[key]>=0?'+':''}{result.final_global_adjustments[key].toFixed(3)}</b></div>)}<div><span>Matched regions</span><b>{result.matched_regions.map(x=>x.name).join(', ')||'Global fallback'}</b></div></div>}
       <div className="side-by-side"><figure><img src={sourcePreview} alt="Original side-by-side"/><figcaption>Original</figcaption></figure><figure><img src={result.enhanced_image_url} alt="Enhanced side-by-side"/><figcaption>Enhanced</figcaption></figure></div>
     </section>}
